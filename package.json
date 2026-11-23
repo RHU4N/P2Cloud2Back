@@ -1,0 +1,21 @@
+{
+  "name": "p2-cloud2-back",
+  "version": "1.0.0",
+  "description": "API REST para migração de arquivos do Google Drive para o Azure Blob Storage.",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@azure/storage-blob": "^12.26.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^5.0.0",
+    "googleapis": "^144.0.0"
+  }
+}
