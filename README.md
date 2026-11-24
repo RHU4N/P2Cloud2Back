@@ -15,7 +15,9 @@ API REST em Node.js e Express para listar arquivos do Google Drive e do Azure Bl
 |---|---|---|
 | `GET` | `/api/health` | Verificar status do servidor |
 | `GET` | `/api/drive/files` | Listar arquivos da pasta no Google Drive |
+| `DELETE` | `/api/drive/files` | Apagar arquivos selecionados do Google Drive (`{ fileIds }`) |
 | `GET` | `/api/blob/files` | Listar arquivos no contêiner Azure |
+| `DELETE` | `/api/blob/files` | Apagar arquivos selecionados do Azure (`{ fileNames }`) |
 | `POST` | `/api/transfer` | Copiar do Google Drive para o Azure (opcional `{ fileIds }`) |
 | `POST` | `/api/transfer/blob-to-drive` | Copiar do Azure para o Google Drive (opcional `{ fileNames }`) |
 | `POST` | `/api/upload/blob` | Enviar arquivos locais (`multipart/form-data`, campo `files`) para o Azure |

@@ -11,6 +11,7 @@ const {
   downloadDriveFileStream,
   driveFileExistsByName,
   uploadDriveFileStream,
+  deleteDriveFile,
 } = require("./services/googleDrive");
 const {
   getContainerName,
@@ -18,6 +19,7 @@ const {
   blobExists,
   uploadBlobStream,
   downloadBlobStream,
+  deleteBlobFile,
 } = require("./services/azureBlob");
 
 const app = express();
@@ -36,7 +38,7 @@ app.use(
       const cleanOrigin = origin.replace(/\/+$/, "");
       return callback(null, allowedOrigins.includes(cleanOrigin));
     },
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
   })
 );
@@ -264,6 +266,138 @@ async function executeBlobToDriveTransfer(
       total: blobs.length,
       uploaded: uploadedCount,
       ignored: ignoredCount,
+      errors: errorCount,
+    },
+    files: results,
+  };
+}
+
+async function executeDeleteBlobFiles(fileNames, deps = { deleteBlobFile }) {
+  const uniqueNames = Array.from(
+    new Set((fileNames || []).map((name) => String(name).trim()).filter(Boolean))
+  );
+
+  console.log("Iniciando exclusão no Azure...\n");
+
+  let deletedCount = 0;
+  let ignoredCount = 0;
+  let errorCount = 0;
+  const results = [];
+
+  for (const fileName of uniqueNames) {
+    try {
+      const removed = await deps.deleteBlobFile(fileName);
+      if (removed) {
+        deletedCount += 1;
+        console.log(`[OK] ${fileName} removido do Azure.`);
+        results.push({
+          name: fileName,
+          status: "deleted",
+          message: "Arquivo removido do Azure com sucesso.",
+        });
+      } else {
+        ignoredCount += 1;
+        console.log(`[IGNORADO] ${fileName} não encontrado no Azure.`);
+        results.push({
+          name: fileName,
+          status: "ignored",
+          message: "Arquivo não encontrado no Azure.",
+        });
+      }
+    } catch (err) {
+      if (err && err.code === "CONFIG_ERROR") {
+        throw err;
+      }
+      errorCount += 1;
+      const reason = (err && err.message) || "Falha ao remover arquivo do Azure.";
+      console.error(`[ERRO] ${fileName} - ${reason}`);
+      results.push({
+        name: fileName,
+        status: "error",
+        message: reason,
+      });
+    }
+  }
+
+  console.log("\nExclusão no Azure finalizada.");
+  console.log(`Excluídos: ${deletedCount} | Ignorados: ${ignoredCount} | Erros: ${errorCount}`);
+
+  return {
+    message: "Exclusão no Azure finalizada.",
+    target: "blob",
+    summary: {
+      total: uniqueNames.length,
+      deleted: deletedCount,
+      ignored: ignoredCount,
+      errors: errorCount,
+    },
+    files: results,
+  };
+}
+
+async function executeDeleteDriveFiles(
+  fileIds,
+  deps = { listDriveFiles, deleteDriveFile }
+) {
+  const uniqueIds = Array.from(
+    new Set((fileIds || []).map((id) => String(id).trim()).filter(Boolean))
+  );
+
+  const nameById = new Map();
+  try {
+    const driveFiles = await deps.listDriveFiles();
+    for (const file of driveFiles) {
+      nameById.set(file.id, file.name);
+    }
+  } catch {
+    // Segue mesmo se a listagem auxiliar de nomes falhar.
+  }
+
+  console.log("Iniciando exclusão no Google Drive...\n");
+
+  let deletedCount = 0;
+  let errorCount = 0;
+  const results = [];
+
+  for (const fileId of uniqueIds) {
+    const fallbackName = nameById.get(fileId) || fileId;
+    try {
+      const removed = await deps.deleteDriveFile(fileId);
+      const displayName = (removed && removed.name) || fallbackName;
+      deletedCount += 1;
+      console.log(`[OK] ${displayName} removido do Google Drive.`);
+      results.push({
+        id: fileId,
+        name: displayName,
+        status: "deleted",
+        message: "Arquivo movido para a lixeira do Google Drive.",
+      });
+    } catch (err) {
+      if (err && err.code === "CONFIG_ERROR") {
+        throw err;
+      }
+      errorCount += 1;
+      const reason = (err && err.message) || "Falha ao remover arquivo do Google Drive.";
+      console.error(`[ERRO] ${fallbackName} - ${reason}`);
+      results.push({
+        id: fileId,
+        name: fallbackName,
+        status: "error",
+        message: reason,
+      });
+    }
+  }
+
+  console.log("\nExclusão no Google Drive finalizada.");
+  console.log(`Excluídos: ${deletedCount} | Erros: ${errorCount}`);
+
+  return {
+    message: "Exclusão no Google Drive finalizada.",
+    target: "drive",
+    summary: {
+      total: uniqueIds.length,
+      deleted: deletedCount,
+      ignored: 0,
       errors: errorCount,
     },
     files: results,
@@ -554,6 +688,64 @@ app.post("/api/upload/drive", upload.array("files", 20), async (req, res) => {
   }
 });
 
+app.delete("/api/blob/files", async (req, res) => {
+  if (transferring) {
+    return res.status(409).json({
+      error: "Já existe uma operação em andamento. Aguarde a conclusão.",
+    });
+  }
+
+  const fileNames = req.body && Array.isArray(req.body.fileNames) ? req.body.fileNames : [];
+  const validNames = fileNames.map((name) => String(name).trim()).filter(Boolean);
+  if (validNames.length === 0) {
+    return res.status(400).json({
+      error: "Informe pelo menos um arquivo do Azure para apagar.",
+    });
+  }
+
+  transferring = true;
+  try {
+    const result = await executeDeleteBlobFiles(validNames);
+    res.status(200).json(result);
+  } catch (err) {
+    const status = err && err.code === "CONFIG_ERROR" ? 503 : 500;
+    res.status(status).json({
+      error: (err && err.message) || "Erro ao apagar arquivos do Azure.",
+    });
+  } finally {
+    transferring = false;
+  }
+});
+
+app.delete("/api/drive/files", async (req, res) => {
+  if (transferring) {
+    return res.status(409).json({
+      error: "Já existe uma operação em andamento. Aguarde a conclusão.",
+    });
+  }
+
+  const fileIds = req.body && Array.isArray(req.body.fileIds) ? req.body.fileIds : [];
+  const validIds = fileIds.map((id) => String(id).trim()).filter(Boolean);
+  if (validIds.length === 0) {
+    return res.status(400).json({
+      error: "Informe pelo menos um arquivo do Google Drive para apagar.",
+    });
+  }
+
+  transferring = true;
+  try {
+    const result = await executeDeleteDriveFiles(validIds);
+    res.status(200).json(result);
+  } catch (err) {
+    const status = err && err.code === "CONFIG_ERROR" ? 503 : 500;
+    res.status(status).json({
+      error: (err && err.message) || "Erro ao apagar arquivos do Google Drive.",
+    });
+  } finally {
+    transferring = false;
+  }
+});
+
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) {
     return res.status(400).json({
@@ -576,4 +768,10 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, executeTransfer, executeBlobToDriveTransfer };
+module.exports = {
+  app,
+  executeTransfer,
+  executeBlobToDriveTransfer,
+  executeDeleteBlobFiles,
+  executeDeleteDriveFiles,
+};

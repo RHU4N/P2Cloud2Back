@@ -182,9 +182,59 @@ async function uploadDriveFileStream(fileName, stream, mimeType) {
   }
 }
 
+async function deleteDriveFile(fileId) {
+  const drive = getDriveClient({ preferOAuth: true });
+  const folderId = getFolderId();
+
+  try {
+    const meta = await drive.files.get({
+      fileId,
+      fields: "id, name, parents, trashed",
+      supportsAllDrives: true,
+    });
+
+    const parents = meta.data.parents || [];
+    if (!parents.includes(folderId)) {
+      throw new Error("Arquivo não pertence à pasta configurada no Google Drive.");
+    }
+
+    if (!meta.data.trashed) {
+      await drive.files.update({
+        fileId,
+        requestBody: { trashed: true },
+        supportsAllDrives: true,
+      });
+    }
+
+    return {
+      id: meta.data.id,
+      name: meta.data.name,
+    };
+  } catch (err) {
+    const status = err?.code || err?.status || err?.response?.status;
+    const reasons = (err?.errors || err?.response?.data?.error?.errors || [])
+      .map((item) => item?.reason || "")
+      .join(" ");
+
+    if (
+      status === 403 ||
+      reasons.includes("insufficientFilePermissions") ||
+      reasons.includes("cannotTrashFile") ||
+      reasons.includes("cannotDelete")
+    ) {
+      throw new Error(
+        "Sem permissão para apagar arquivos na pasta do Google Drive. Conceda permissão de Editor ou configure OAuth2 no backend."
+      );
+    }
+
+    throw translateDriveWriteError(err);
+  }
+}
+
 module.exports = {
   listDriveFiles,
   downloadDriveFileStream,
   driveFileExistsByName,
   uploadDriveFileStream,
+  deleteDriveFile,
 };

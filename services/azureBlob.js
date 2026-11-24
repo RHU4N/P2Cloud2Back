@@ -69,10 +69,18 @@ async function downloadBlobStream(blobName) {
   };
 }
 
+async function deleteBlobFile(blobName) {
+  const containerClient = getContainerClient();
+  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+  const response = await blockBlobClient.deleteIfExists();
+  return Boolean(response.succeeded);
+}
+
 module.exports = {
   getContainerName,
   listBlobFiles,
   blobExists,
   uploadBlobStream,
   downloadBlobStream,
+  deleteBlobFile,
 };
