@@ -44,6 +44,11 @@ app.use(
 );
 
 app.use(express.json());
+app.disable("x-powered-by");
+app.use((req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -763,7 +768,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log(`Servidor rodando na porta ${PORT}`);
   });
 }
