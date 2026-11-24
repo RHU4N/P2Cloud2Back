@@ -35,6 +35,7 @@ app.use(
 app.use(express.json());
 
 async function executeTransfer(
+  fileIds = null,
   deps = {
     listDriveFiles,
     downloadDriveFileStream,
@@ -42,7 +43,12 @@ async function executeTransfer(
     uploadBlobStream,
   }
 ) {
-  const driveFiles = await deps.listDriveFiles();
+  const allDriveFiles = await deps.listDriveFiles();
+  const hasFilter = Array.isArray(fileIds) && fileIds.length > 0;
+  const selectedIdSet = hasFilter ? new Set(fileIds.map((id) => String(id).trim()).filter(Boolean)) : null;
+  const driveFiles = selectedIdSet
+    ? allDriveFiles.filter((file) => selectedIdSet.has(file.id))
+    : allDriveFiles;
 
   console.log("Iniciando migração...\n");
 
@@ -189,15 +195,34 @@ app.get("/api/blob/files", async (req, res) => {
   }
 });
 
+let transferring = false;
+
 app.post("/api/transfer", async (req, res) => {
+  if (transferring) {
+    return res.status(409).json({
+      error: "Já existe uma migração em andamento. Aguarde a conclusão.",
+    });
+  }
+
+  if (req.body && Array.isArray(req.body.fileIds) && req.body.fileIds.length === 0) {
+    return res.status(400).json({
+      error: "Selecione pelo menos um arquivo para transferir.",
+    });
+  }
+
+  const selectedIds = req.body && Array.isArray(req.body.fileIds) ? req.body.fileIds : null;
+
+  transferring = true;
   try {
-    const result = await executeTransfer();
+    const result = await executeTransfer(selectedIds);
     res.status(200).json(result);
   } catch (err) {
     const status = err && err.code === "CONFIG_ERROR" ? 503 : 500;
     res.status(status).json({
       error: (err && err.message) || "Erro ao executar a migração.",
     });
+  } finally {
+    transferring = false;
   }
 });
 
