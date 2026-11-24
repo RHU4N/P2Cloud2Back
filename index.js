@@ -1,14 +1,23 @@
 require("dotenv").config();
 
+const path = require("path");
+const { Readable } = require("stream");
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
 
-const { listDriveFiles, downloadDriveFileStream } = require("./services/googleDrive");
+const {
+  listDriveFiles,
+  downloadDriveFileStream,
+  driveFileExistsByName,
+  uploadDriveFileStream,
+} = require("./services/googleDrive");
 const {
   getContainerName,
   listBlobFiles,
   blobExists,
   uploadBlobStream,
+  downloadBlobStream,
 } = require("./services/azureBlob");
 
 const app = express();
@@ -34,6 +43,26 @@ app.use(
 
 app.use(express.json());
 
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 100 * 1024 * 1024,
+    files: 20,
+  },
+});
+
+function decodeUploadFilename(originalname) {
+  let name = originalname || "arquivo";
+  try {
+    if (/[ÃÂ]/.test(name)) {
+      name = Buffer.from(name, "latin1").toString("utf8");
+    }
+  } catch {
+    name = originalname || "arquivo";
+  }
+  return path.basename(name);
+}
+
 async function executeTransfer(
   fileIds = null,
   deps = {
@@ -45,12 +74,14 @@ async function executeTransfer(
 ) {
   const allDriveFiles = await deps.listDriveFiles();
   const hasFilter = Array.isArray(fileIds) && fileIds.length > 0;
-  const selectedIdSet = hasFilter ? new Set(fileIds.map((id) => String(id).trim()).filter(Boolean)) : null;
+  const selectedIdSet = hasFilter
+    ? new Set(fileIds.map((id) => String(id).trim()).filter(Boolean))
+    : null;
   const driveFiles = selectedIdSet
     ? allDriveFiles.filter((file) => selectedIdSet.has(file.id))
     : allDriveFiles;
 
-  console.log("Iniciando migração...\n");
+  console.log("Iniciando migração (Drive -> Azure)...\n");
 
   let uploadedCount = 0;
   let ignoredCount = 0;
@@ -140,8 +171,97 @@ async function executeTransfer(
 
   return {
     message: "Migração finalizada.",
+    direction: "drive-to-blob",
     summary: {
       total: driveFiles.length,
+      uploaded: uploadedCount,
+      ignored: ignoredCount,
+      errors: errorCount,
+    },
+    files: results,
+  };
+}
+
+async function executeBlobToDriveTransfer(
+  fileNames = null,
+  deps = {
+    listBlobFiles,
+    driveFileExistsByName,
+    downloadBlobStream,
+    uploadDriveFileStream,
+  }
+) {
+  const allBlobs = await deps.listBlobFiles();
+  const hasFilter = Array.isArray(fileNames) && fileNames.length > 0;
+  const selectedNameSet = hasFilter
+    ? new Set(fileNames.map((name) => String(name).trim()).filter(Boolean))
+    : null;
+  const blobs = selectedNameSet
+    ? allBlobs.filter((blob) => selectedNameSet.has(blob.name))
+    : allBlobs;
+
+  console.log("Iniciando migração (Azure -> Drive)...\n");
+
+  let uploadedCount = 0;
+  let ignoredCount = 0;
+  let errorCount = 0;
+  const results = [];
+
+  for (const blob of blobs) {
+    try {
+      const alreadyExists = await deps.driveFileExistsByName(blob.name);
+      if (alreadyExists) {
+        ignoredCount += 1;
+        console.log(`[IGNORADO] ${blob.name} já existe no Google Drive.`);
+        results.push({
+          name: blob.name,
+          size: blob.size,
+          status: "ignored",
+          message: "Arquivo já existe no Google Drive e foi ignorado.",
+        });
+        continue;
+      }
+
+      const downloaded = await deps.downloadBlobStream(blob.name);
+      await deps.uploadDriveFileStream(
+        blob.name,
+        downloaded.stream,
+        blob.contentType || downloaded.contentType
+      );
+
+      uploadedCount += 1;
+      console.log(`[OK] ${blob.name} enviado para o Google Drive.`);
+      results.push({
+        name: blob.name,
+        size: blob.size,
+        status: "success",
+        message: "Arquivo enviado para o Google Drive com sucesso.",
+      });
+    } catch (err) {
+      if (err && err.code === "CONFIG_ERROR") {
+        throw err;
+      }
+
+      errorCount += 1;
+      const reason = (err && err.message) || "Falha ao enviar para o Google Drive.";
+      console.error(`[ERRO] ${blob.name} - ${reason}`);
+      results.push({
+        name: blob.name,
+        size: blob.size,
+        status: "error",
+        message: reason,
+      });
+    }
+  }
+
+  console.log("\nMigração Azure -> Drive finalizada.");
+  console.log(`Sucesso: ${uploadedCount} | Ignorados: ${ignoredCount} | Erros: ${errorCount}`);
+
+  return {
+    message: "Migração Azure → Drive finalizada.",
+    direction: "blob-to-drive",
+    summary: {
+      total: blobs.length,
       uploaded: uploadedCount,
       ignored: ignoredCount,
       errors: errorCount,
@@ -226,6 +346,228 @@ app.post("/api/transfer", async (req, res) => {
   }
 });
 
+app.post("/api/transfer/blob-to-drive", async (req, res) => {
+  if (transferring) {
+    return res.status(409).json({
+      error: "Já existe uma operação em andamento. Aguarde a conclusão.",
+    });
+  }
+
+  if (req.body && Array.isArray(req.body.fileNames) && req.body.fileNames.length === 0) {
+    return res.status(400).json({
+      error: "Selecione pelo menos um arquivo do Azure para transferir.",
+    });
+  }
+
+  const selectedNames =
+    req.body && Array.isArray(req.body.fileNames) ? req.body.fileNames : null;
+
+  transferring = true;
+  try {
+    const result = await executeBlobToDriveTransfer(selectedNames);
+    res.status(200).json(result);
+  } catch (err) {
+    const status = err && err.code === "CONFIG_ERROR" ? 503 : 500;
+    res.status(status).json({
+      error: (err && err.message) || "Erro ao transferir do Azure para o Google Drive.",
+    });
+  } finally {
+    transferring = false;
+  }
+});
+
+app.post("/api/upload/blob", upload.array("files", 20), async (req, res) => {
+  if (transferring) {
+    return res.status(409).json({
+      error: "Já existe uma operação em andamento. Aguarde a conclusão.",
+    });
+  }
+
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({
+      error: "Envie pelo menos um arquivo.",
+    });
+  }
+
+  transferring = true;
+  try {
+    console.log("Iniciando upload do site para o Azure...\n");
+    let uploadedCount = 0;
+    let ignoredCount = 0;
+    let errorCount = 0;
+    const results = [];
+
+    for (const file of req.files) {
+      const fileName = decodeUploadFilename(file.originalname);
+
+      try {
+        const exists = await blobExists(fileName);
+        if (exists) {
+          ignoredCount += 1;
+          console.log(`[IGNORADO] ${fileName} já existe no Azure.`);
+          results.push({
+            name: fileName,
+            size: file.size,
+            status: "ignored",
+            message: "Arquivo já existe no Azure e foi ignorado.",
+          });
+          continue;
+        }
+
+        await uploadBlobStream(fileName, Readable.from(file.buffer), file.mimetype);
+        uploadedCount += 1;
+        console.log(`[OK] ${fileName} enviado para o Azure.`);
+        results.push({
+          name: fileName,
+          size: file.size,
+          status: "success",
+          message: "Arquivo enviado para o Azure com sucesso.",
+        });
+      } catch (err) {
+        if (err && err.code === "CONFIG_ERROR") {
+          throw err;
+        }
+        if (err && err.statusCode === 412) {
+          ignoredCount += 1;
+          results.push({
+            name: fileName,
+            size: file.size,
+            status: "ignored",
+            message: "Arquivo já existe no Azure e foi ignorado.",
+          });
+          continue;
+        }
+        errorCount += 1;
+        const reason = (err && err.message) || "Falha no upload para o Azure.";
+        console.error(`[ERRO] ${fileName} - ${reason}`);
+        results.push({
+          name: fileName,
+          size: file.size,
+          status: "error",
+          message: reason,
+        });
+      }
+    }
+
+    res.status(200).json({
+      message: "Upload para o Azure finalizado.",
+      destination: "blob",
+      summary: {
+        total: req.files.length,
+        uploaded: uploadedCount,
+        ignored: ignoredCount,
+        errors: errorCount,
+      },
+      files: results,
+    });
+  } catch (err) {
+    const status = err && err.code === "CONFIG_ERROR" ? 503 : 500;
+    res.status(status).json({
+      error: (err && err.message) || "Erro ao enviar arquivos para o Azure.",
+    });
+  } finally {
+    transferring = false;
+  }
+});
+
+app.post("/api/upload/drive", upload.array("files", 20), async (req, res) => {
+  if (transferring) {
+    return res.status(409).json({
+      error: "Já existe uma operação em andamento. Aguarde a conclusão.",
+    });
+  }
+
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({
+      error: "Envie pelo menos um arquivo.",
+    });
+  }
+
+  transferring = true;
+  try {
+    console.log("Iniciando upload do site para o Google Drive...\n");
+    let uploadedCount = 0;
+    let ignoredCount = 0;
+    let errorCount = 0;
+    const results = [];
+
+    for (const file of req.files) {
+      const fileName = decodeUploadFilename(file.originalname);
+
+      try {
+        const exists = await driveFileExistsByName(fileName);
+        if (exists) {
+          ignoredCount += 1;
+          console.log(`[IGNORADO] ${fileName} já existe no Google Drive.`);
+          results.push({
+            name: fileName,
+            size: file.size,
+            status: "ignored",
+            message: "Arquivo já existe no Google Drive e foi ignorado.",
+          });
+          continue;
+        }
+
+        await uploadDriveFileStream(fileName, Readable.from(file.buffer), file.mimetype);
+        uploadedCount += 1;
+        console.log(`[OK] ${fileName} enviado para o Google Drive.`);
+        results.push({
+          name: fileName,
+          size: file.size,
+          status: "success",
+          message: "Arquivo enviado para o Google Drive com sucesso.",
+        });
+      } catch (err) {
+        if (err && err.code === "CONFIG_ERROR") {
+          throw err;
+        }
+        errorCount += 1;
+        const reason = (err && err.message) || "Falha no upload para o Google Drive.";
+        console.error(`[ERRO] ${fileName} - ${reason}`);
+        results.push({
+          name: fileName,
+          size: file.size,
+          status: "error",
+          message: reason,
+        });
+      }
+    }
+
+    res.status(200).json({
+      message: "Upload para o Google Drive finalizado.",
+      destination: "drive",
+      summary: {
+        total: req.files.length,
+        uploaded: uploadedCount,
+        ignored: ignoredCount,
+        errors: errorCount,
+      },
+      files: results,
+    });
+  } catch (err) {
+    const status = err && err.code === "CONFIG_ERROR" ? 503 : 500;
+    res.status(status).json({
+      error: (err && err.message) || "Erro ao enviar arquivos para o Google Drive.",
+    });
+  } finally {
+    transferring = false;
+  }
+});
+
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({
+      error:
+        err.code === "LIMIT_FILE_SIZE"
+          ? "Arquivo excede o limite máximo de 100 MB."
+          : err.code === "LIMIT_FILE_COUNT"
+          ? "Máximo de 20 arquivos por envio."
+          : `Erro no envio de arquivos: ${err.message}`,
+    });
+  }
+  return next(err);
+});
+
 const PORT = process.env.PORT || 3000;
 
 if (require.main === module) {
@@ -234,4 +576,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, executeTransfer };
+module.exports = { app, executeTransfer, executeBlobToDriveTransfer };

@@ -6,7 +6,28 @@ function createConfigError(message) {
   return err;
 }
 
-function getDriveClient() {
+function getOAuthDriveClient() {
+  const clientId = (process.env.GOOGLE_OAUTH_CLIENT_ID || "").trim();
+  const clientSecret = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || "").trim();
+  const refreshToken = (process.env.GOOGLE_OAUTH_REFRESH_TOKEN || "").trim();
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    return null;
+  }
+
+  const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+  oauth2Client.setCredentials({ refresh_token: refreshToken });
+  return google.drive({ version: "v3", auth: oauth2Client });
+}
+
+function getDriveClient({ preferOAuth = false } = {}) {
+  if (preferOAuth) {
+    const oauthClient = getOAuthDriveClient();
+    if (oauthClient) {
+      return oauthClient;
+    }
+  }
+
   const rawB64 = (process.env.GOOGLE_SERVICE_ACCOUNT_JSON_B64 || "").trim();
   if (!rawB64) {
     throw createConfigError("Variável GOOGLE_SERVICE_ACCOUNT_JSON_B64 não configurada.");
@@ -29,7 +50,7 @@ function getDriveClient() {
 
   const auth = new google.auth.GoogleAuth({
     credentials,
-    scopes: ["https://www.googleapis.com/auth/drive.readonly"],
+    scopes: ["https://www.googleapis.com/auth/drive"],
   });
 
   return google.drive({ version: "v3", auth });
@@ -41,6 +62,36 @@ function getFolderId() {
     throw createConfigError("Variável GOOGLE_DRIVE_FOLDER_ID não configurada.");
   }
   return folderId;
+}
+
+function translateDriveWriteError(err) {
+  const rawMessage = String(err?.message || "");
+  const reasons = (err?.errors || err?.response?.data?.error?.errors || [])
+    .map((item) => item?.reason || "")
+    .join(" ");
+  const status = err?.code || err?.status || err?.response?.status;
+
+  if (
+    reasons.includes("storageQuotaExceeded") ||
+    rawMessage.includes("Service Accounts do not have storage quota") ||
+    rawMessage.includes("storage quota")
+  ) {
+    return new Error(
+      "A Service Account do Google não tem cota de gravação no Meu Drive pessoal. Configure GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET e GOOGLE_OAUTH_REFRESH_TOKEN no .env do backend (ou use um Drive Compartilhado)."
+    );
+  }
+
+  if (
+    status === 403 ||
+    reasons.includes("insufficientFilePermissions") ||
+    reasons.includes("cannotAddChildren")
+  ) {
+    return new Error(
+      "Sem permissão de escrita na pasta do Google Drive. Conceda permissão de Editor ou configure OAuth2 no backend."
+    );
+  }
+
+  return err;
 }
 
 async function listDriveFiles() {
@@ -91,7 +142,49 @@ async function downloadDriveFileStream(fileId) {
   return response.data;
 }
 
+async function driveFileExistsByName(fileName) {
+  const drive = getDriveClient();
+  const folderId = getFolderId();
+  const escaped = String(fileName).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+
+  const response = await drive.files.list({
+    q: `'${folderId}' in parents and name = '${escaped}' and trashed = false`,
+    fields: "files(id, name)",
+    pageSize: 1,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+  });
+
+  return Boolean(response.data.files && response.data.files.length > 0);
+}
+
+async function uploadDriveFileStream(fileName, stream, mimeType) {
+  const drive = getDriveClient({ preferOAuth: true });
+  const folderId = getFolderId();
+
+  try {
+    const response = await drive.files.create({
+      requestBody: {
+        name: fileName,
+        parents: [folderId],
+      },
+      media: {
+        mimeType: mimeType || "application/octet-stream",
+        body: stream,
+      },
+      fields: "id, name, mimeType, size",
+      supportsAllDrives: true,
+    });
+
+    return response.data;
+  } catch (err) {
+    throw translateDriveWriteError(err);
+  }
+}
+
 module.exports = {
   listDriveFiles,
   downloadDriveFileStream,
+  driveFileExistsByName,
+  uploadDriveFileStream,
 };

@@ -57,9 +57,22 @@ async function uploadBlobStream(blobName, stream, contentType) {
   });
 }
 
+async function downloadBlobStream(blobName) {
+  const containerClient = getContainerClient();
+  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
+  const response = await blockBlobClient.download(0);
+
+  return {
+    stream: response.readableStreamBody,
+    contentType: response.contentType || "application/octet-stream",
+    size: response.contentLength ?? null,
+  };
+}
+
 module.exports = {
   getContainerName,
   listBlobFiles,
   blobExists,
   uploadBlobStream,
+  downloadBlobStream,
 };
