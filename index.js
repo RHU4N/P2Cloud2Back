@@ -1,6 +1,5 @@
 require("dotenv").config();
 
-const crypto = require("crypto");
 const express = require("express");
 const cors = require("cors");
 
@@ -29,44 +28,11 @@ app.use(
       return callback(null, allowedOrigins.includes(cleanOrigin));
     },
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: ["Content-Type"],
   })
 );
 
 app.use(express.json());
-
-function requireAccessToken(req, res, next) {
-  const expectedToken = (process.env.APP_ACCESS_TOKEN || "").trim();
-  if (!expectedToken) {
-    return res.status(503).json({
-      error: "APP_ACCESS_TOKEN não configurado no servidor.",
-    });
-  }
-
-  const authHeader = req.headers.authorization || "";
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  const providedToken = (match ? match[1] : authHeader).trim();
-
-  if (!providedToken) {
-    return res.status(401).json({
-      error: "Token de acesso inválido ou ausente.",
-    });
-  }
-
-  const expectedBuffer = Buffer.from(expectedToken, "utf8");
-  const providedBuffer = Buffer.from(providedToken, "utf8");
-
-  if (
-    expectedBuffer.length !== providedBuffer.length ||
-    !crypto.timingSafeEqual(expectedBuffer, providedBuffer)
-  ) {
-    return res.status(401).json({
-      error: "Token de acesso inválido ou ausente.",
-    });
-  }
-
-  return next();
-}
 
 async function executeTransfer(
   deps = {
@@ -192,7 +158,7 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-app.get("/api/drive/files", requireAccessToken, async (req, res) => {
+app.get("/api/drive/files", async (req, res) => {
   try {
     const files = await listDriveFiles();
     res.status(200).json({
@@ -207,7 +173,7 @@ app.get("/api/drive/files", requireAccessToken, async (req, res) => {
   }
 });
 
-app.get("/api/blob/files", requireAccessToken, async (req, res) => {
+app.get("/api/blob/files", async (req, res) => {
   try {
     const files = await listBlobFiles();
     res.status(200).json({
@@ -223,7 +189,7 @@ app.get("/api/blob/files", requireAccessToken, async (req, res) => {
   }
 });
 
-app.post("/api/transfer", requireAccessToken, async (req, res) => {
+app.post("/api/transfer", async (req, res) => {
   try {
     const result = await executeTransfer();
     res.status(200).json(result);

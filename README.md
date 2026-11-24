@@ -11,12 +11,12 @@ API REST em Node.js e Express para listar arquivos de uma pasta do Google Drive 
 
 ## Endpoints
 
-| Método | Endpoint | Autenticação | Função |
-|---|---|---|---|
-| `GET` | `/api/health` | Pública | Verificar status do servidor |
-| `GET` | `/api/drive/files` | `Authorization: Bearer <token>` | Listar arquivos da pasta no Google Drive |
-| `GET` | `/api/blob/files` | `Authorization: Bearer <token>` | Listar arquivos no contêiner Azure |
-| `POST` | `/api/transfer` | `Authorization: Bearer <token>` | Copiar arquivos do Drive para o Azure sem sobrescrever existentes |
+| Método | Endpoint | Função |
+|---|---|---|
+| `GET` | `/api/health` | Verificar status do servidor |
+| `GET` | `/api/drive/files` | Listar arquivos da pasta no Google Drive |
+| `GET` | `/api/blob/files` | Listar arquivos no contêiner Azure |
+| `POST` | `/api/transfer` | Copiar arquivos do Drive para o Azure sem sobrescrever existentes |
 
 ## Configuração
 
@@ -29,7 +29,6 @@ GOOGLE_SERVICE_ACCOUNT_JSON_B64=
 AZURE_STORAGE_CONNECTION_STRING=
 AZURE_CONTAINER_NAME=aluno-rhuan
 FRONTEND_URL=
-APP_ACCESS_TOKEN=
 ```
 
 - `GOOGLE_SERVICE_ACCOUNT_JSON_B64`: conteúdo do JSON da Service Account codificado em Base64 (sem quebras ou com espaços simples). A Service Account deve ter permissão de leitura na pasta do Google Drive.
